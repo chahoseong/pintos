@@ -1,0 +1,11 @@
+services:
+    dev:
+        image: thierrysans/pintos
+        container_name: pintos
+        volumes:
+            - .:/pintos
+        working_dir: /pintos
+        hostname: pintos
+        tty: true
+        entrypoint: bash
+        
