@@ -22,7 +22,7 @@ struct sleep_thread
   {
     struct list_elem elem;
     struct thread *thread;
-    int64_t duration;
+    int64_t end_ticks;
   };
 
 /* Number of timer ticks since OS booted. */
@@ -104,6 +104,8 @@ timer_elapsed (int64_t then)
 void
 timer_sleep (int64_t ticks) 
 {
+  int64_t start = timer_ticks ();
+
   ASSERT (intr_get_level () == INTR_ON);
 
   if (ticks > 0)
@@ -112,7 +114,7 @@ timer_sleep (int64_t ticks)
 
       struct sleep_thread sleeper;
       sleeper.thread = thread_current ();
-      sleeper.duration = ticks;
+      sleeper.end_ticks = start + ticks;
       
       lock_acquire (&sleep_lock);
       list_push_back (&wait_list, &sleeper.elem);
@@ -212,9 +214,7 @@ update_wait_list (void)
     {
       struct sleep_thread *sleeper = list_entry (cursor, struct sleep_thread, elem);
 
-      sleeper->duration--;
-
-      if (sleeper->duration > 0)
+      if (sleeper->end_ticks > ticks)
         cursor = list_next (cursor);
       else
         {
