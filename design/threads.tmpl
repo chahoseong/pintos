@@ -30,10 +30,26 @@ FirstName LastName <email@domain.example>
 >> `struct' member, global or static variable, `typedef', or
 >> enumeration.  Identify the purpose of each in 25 words or less.
 
+struct sleep_thread
+  {
+    struct list_elem elem;
+    struct thread *thread;
+    int64_t duration;
+  };
+
+static struct list wait_list;
+static struct lock sleep_lock;
+
 ---- ALGORITHMS ----
 
 >> A2: Briefly describe what happens in a call to timer_sleep(),
 >> including the effects of the timer interrupt handler.
+
+timer_sleep 함수가 호출되면 현재 스레드를 일정 시간(tick)동안 실행을 지연시킵니다.
+그리고 관련 정보를 sleep_thread 구조체에 설정한 다음, wait_list에 추가합니다.
+이후에, timer interrupt handler가 호출될 때마다 wait_list를 순회하면서 대기 중인
+스레드의 종료 시간을 검사합니다. 이때, 종료 시간이 지난 스레드는 다시 ready_list에
+추가하여 scheduler에게 선택 받을 수 있도록 합니다.
 
 >> A3: What steps are taken to minimize the amount of time spent in
 >> the timer interrupt handler?
@@ -43,8 +59,13 @@ FirstName LastName <email@domain.example>
 >> A4: How are race conditions avoided when multiple threads call
 >> timer_sleep() simultaneously?
 
+lock을 사용하여 여러 스레드에서 timer_sleep 함수를 동시에 호출할 때 wait_list가 경쟁 상태에
+빠지는 것을 막습니다.
+
 >> A5: How are race conditions avoided when a timer interrupt occurs
 >> during a call to timer_sleep()?
+
+timer_sleep을 실행 하는 도중에 timer interrupt가 호출되지 않도록 interrupt를 비활성화 합니다.
 
 ---- RATIONALE ----
 

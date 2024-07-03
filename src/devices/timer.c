@@ -17,6 +17,16 @@
 #error TIMER_FREQ <= 1000 recommended
 #endif
 
+struct sleep_thread
+  {
+	  struct list_elem elem;
+    struct thread *thread;
+    int64_t end_ticks;
+  };
+
+struct list wait_list;
+struct lock sleep_lock;
+
 /* Number of timer ticks since OS booted. */
 static int64_t ticks;
 
@@ -30,11 +40,15 @@ static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
 static void real_time_delay (int64_t num, int32_t denom);
 
+static void update_wait_list (void);
+
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
    and registers the corresponding interrupt. */
 void
 timer_init (void) 
 {
+  list_init (&wait_list);
+  lock_init (&sleep_lock);
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
 }
@@ -92,8 +106,23 @@ timer_sleep (int64_t ticks)
   int64_t start = timer_ticks ();
 
   ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
+
+  if (ticks > 0)
+    {
+      enum intr_level old_level = intr_disable ();
+    
+      struct sleep_thread sleeper;
+      sleeper.thread = thread_current ();
+      sleeper.end_ticks = start + ticks;
+      
+      lock_acquire (&sleep_lock);
+      list_push_back (&wait_list, &sleeper.elem);
+      lock_release (&sleep_lock);
+      
+      thread_block ();
+      
+      intr_set_level (old_level);
+    }
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -172,6 +201,26 @@ timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
   thread_tick ();
+  update_wait_list ();
+}
+
+static void
+update_wait_list (void)
+{
+  struct list_elem *cursor = list_begin (&wait_list);
+  
+  while (cursor != list_end (&wait_list))
+    {
+      struct sleep_thread *sleeper = list_entry (cursor, struct sleep_thread, elem);
+      
+      if (sleeper->end_ticks > ticks)
+      	cursor = list_next (cursor);
+      else
+        {
+          cursor = list_remove (&sleeper->elem);
+          thread_unblock (sleeper->thread);
+        }
+    }
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
