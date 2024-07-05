@@ -9,7 +9,6 @@
 #include "threads/intr-stubs.h"
 #include "threads/palloc.h"
 #include "threads/switch.h"
-#include "threads/synch.h"
 #include "threads/vaddr.h"
 #ifdef USERPROG
 #include "userprog/process.h"
@@ -59,6 +58,8 @@ static unsigned thread_ticks;   /* # of timer ticks since last yield. */
    Controlled by kernel command-line option "-o mlfqs". */
 bool thread_mlfqs;
 
+struct lock file_lock;
+
 static void kernel_thread (thread_func *, void *aux);
 
 static void idle (void *aux UNUSED);
@@ -95,6 +96,8 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
+
+  lock_init (&file_lock);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -521,10 +524,21 @@ init_thread (struct thread *t, const char *name, int priority)
   t->status = THREAD_BLOCKED;
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
+  
   t->priority = priority;
   t->captured_priority = priority;
   t->donated_to = NULL;
   list_init (&t->donation_list);
+
+  sema_init (&t->running, 0);
+  sema_init (&t->wait, 0);
+  t->exit_status = 0;
+  t->executable = NULL;
+  memset (t->open_files, 0, sizeof t->open_files);
+
+  t->parent = NULL;
+  list_init (&t->child_list);
+
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();

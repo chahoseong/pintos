@@ -17,9 +17,26 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/synch.h"
+
+#define ARG_MAX 32
+#define DELIMITER " "
+
+struct process_params
+  {
+    /* input */
+    char *name;
+    char *args;
+    struct thread *parent;
+    struct semaphore started;
+
+    /* output */
+    bool success;
+  };
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
+static void push_stack (void **stack, const void *value, size_t size);
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -38,31 +55,98 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+  char *args = NULL;
+  char *process_name = strtok_r ((char*)fn_copy, DELIMITER, &args);
+
+  struct process_params params;
+  params.name = process_name;
+  params.args = args;
+  params.parent = thread_current ();
+  sema_init (&params.started, 0);
+  params.success = false;
+
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (process_name, PRI_DEFAULT, start_process, &params);
   if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
-  return tid;
+    {
+      palloc_free_page (fn_copy);
+      return tid;
+    }
+
+  /* Wait for process status is executable */
+  sema_down (&params.started);
+
+  return params.success ? tid : TID_ERROR;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
+start_process (void *aux)
 {
-  char *file_name = file_name_;
+  struct process_params *params = (struct process_params *)aux;
   struct intr_frame if_;
   bool success;
+
+  int argc = 0;
+  char *argv[ARG_MAX];
+
+  memset (argv, 0, sizeof argv);
+  argv[argc++] = params->name;
+
+  char *token = strtok_r (NULL, DELIMITER, &params->args);
+  while (token != NULL)
+    {
+      argv[argc++] = token;
+      token = strtok_r (NULL, DELIMITER, &params->args);
+    }
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+  success = load (params->name, &if_.eip, &if_.esp);
+
+  if (success)
+    {
+      /* Push argument value */
+      for (int i = argc - 1; i >= 0; --i)
+        {
+          push_stack (&if_.esp, argv[i], strlen (argv[i]) + 1);
+          argv[i] = if_.esp;
+        }
+
+      /* Push argument address */
+      for (int i = argc; i >= 0; --i)
+        push_stack (&if_.esp, argv + i, sizeof (char*));
+      
+      /* Push argument vector address */
+      void *argument_vector = if_.esp;
+      push_stack (&if_.esp, &argument_vector, sizeof (void*));
+
+      /* Push argument count */
+      push_stack (&if_.esp, &argc, sizeof argc);
+
+      /* Push return address */
+      void *return_address = NULL;
+      push_stack (&if_.esp, &return_address, sizeof return_address);
+
+      struct thread *t = thread_current ();
+      t->parent = params->parent;
+      if (t->parent != NULL)
+        list_push_back (&t->parent->child_list, &t->child_elem);
+      
+      if (t->executable != NULL)
+        /* Deny writing to executing program. */
+        file_deny_write (t->executable);
+    }
+
+  params->success = success;
+  sema_up (&params->started);
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);
+  palloc_free_page (params->name);
   if (!success) 
     thread_exit ();
 
@@ -74,6 +158,15 @@ start_process (void *file_name_)
      and jump to it. */
   asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
   NOT_REACHED ();
+}
+
+static void
+push_stack (void **stack, const void *value, size_t size)
+{
+  *stack -= size;
+  /* Aligned by 4 bytes */
+  *stack -= (uintptr_t)(*stack) % 4;
+  memcpy (*stack, value, size);
 }
 
 /* Waits for thread TID to die and returns its exit status.  If
@@ -88,7 +181,29 @@ start_process (void *file_name_)
 int
 process_wait (tid_t child_tid UNUSED) 
 {
-  return -1;
+  struct thread *parent = thread_current ();
+  struct thread *child = NULL;
+  int exit_status = -1;
+
+  /* Find child thread. */
+  for (struct list_elem *cursor = list_begin (&parent->child_list); cursor != list_end (&parent->child_list); cursor = list_next (cursor))
+    {
+      struct thread *t = list_entry (cursor, struct thread, child_elem);
+      if (t->tid == child_tid)
+        {
+          child = t;
+          break;
+        }
+    }
+
+  if (child != NULL && child->wait.value == 0)
+    {
+      sema_down (&child->running);
+      exit_status = child->exit_status;
+      sema_up (&child->wait);
+    }
+
+  return exit_status;
 }
 
 /* Free the current process's resources. */
@@ -97,6 +212,14 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+
+  /* Close executable and open files. */
+  file_close (cur->executable);
+  for (int fd = STDOUT_FILENO + 1; fd < NOFILE; ++fd)
+    file_close (cur->open_files[fd]);
+
+  if (file_lock.holder == cur)
+    lock_release (&file_lock);
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
@@ -113,6 +236,14 @@ process_exit (void)
       cur->pagedir = NULL;
       pagedir_activate (NULL);
       pagedir_destroy (pd);
+    }
+
+  sema_up (&cur->running);
+
+  if (cur->parent != NULL)
+    {
+      sema_down (&cur->wait);
+      list_remove (&cur->child_elem);
     }
 }
 
@@ -222,7 +353,10 @@ load (const char *file_name, void (**eip) (void), void **esp)
   process_activate ();
 
   /* Open executable file. */
+  lock_acquire (&file_lock);
   file = filesys_open (file_name);
+  lock_release (&file_lock);
+
   if (file == NULL) 
     {
       printf ("load: %s: open failed\n", file_name);
@@ -312,7 +446,15 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
  done:
   /* We arrive here whether the load is successful or not. */
-  file_close (file);
+  if (success)
+    t->executable = file;
+  else
+    {
+      lock_acquire (&file_lock);
+      file_close (file);
+      lock_release (&file_lock);
+    }
+
   return success;
 }
 
@@ -437,7 +579,7 @@ setup_stack (void **esp)
     {
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
       if (success)
-        *esp = PHYS_BASE;
+        *esp = USER_STACK;
       else
         palloc_free_page (kpage);
     }
