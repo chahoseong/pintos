@@ -30,10 +30,26 @@ FirstName LastName <email@domain.example>
 >> `struct' member, global or static variable, `typedef', or
 >> enumeration.  Identify the purpose of each in 25 words or less.
 
+struct sleep_thread
+  {
+    struct list_elem elem;
+    struct thread *thread;
+    int64_t duration;
+  };
+
+static struct list wait_list;
+static struct lock sleep_lock;
+
 ---- ALGORITHMS ----
 
 >> A2: Briefly describe what happens in a call to timer_sleep(),
 >> including the effects of the timer interrupt handler.
+
+timer_sleep 함수가 호출되면 현재 스레드를 일정 시간(tick)동안 실행을 지연시킵니다.
+그리고 관련 정보를 sleep_thread 구조체에 설정한 다음, wait_list에 추가합니다.
+이후에, timer interrupt handler가 호출될 때마다 wait_list를 순회하면서 대기 중인
+스레드의 종료 시간을 검사합니다. 이때, 종료 시간이 지난 스레드는 다시 ready_list에
+추가하여 scheduler에게 선택 받을 수 있도록 합니다.
 
 >> A3: What steps are taken to minimize the amount of time spent in
 >> the timer interrupt handler?
@@ -43,8 +59,13 @@ FirstName LastName <email@domain.example>
 >> A4: How are race conditions avoided when multiple threads call
 >> timer_sleep() simultaneously?
 
+lock을 사용하여 여러 스레드에서 timer_sleep 함수를 동시에 호출할 때 wait_list가 경쟁 상태에
+빠지는 것을 막습니다.
+
 >> A5: How are race conditions avoided when a timer interrupt occurs
 >> during a call to timer_sleep()?
+
+timer_sleep을 실행 하는 도중에 timer interrupt가 호출되지 않도록 interrupt를 비활성화 합니다.
 
 ---- RATIONALE ----
 
@@ -60,26 +81,69 @@ FirstName LastName <email@domain.example>
 >> `struct' member, global or static variable, `typedef', or
 >> enumeration.  Identify the purpose of each in 25 words or less.
 
+struct thread
+  {
+    ...
+    int captured_priority;
+    struct thread *donated_to;
+    struct list donation_list;
+    struct list_elem donation_elem;
+    ...
+  };
+
 >> B2: Explain the data structure used to track priority donation.
 >> Use ASCII art to diagram a nested donation.  (Alternately, submit a
 >> .png file.)
+
+- donation_list: 현재 스레드에게 우선순위를 기부 중인 스레드 목록
+- donated_to: 현재 스레드의 우선순위를 기부 받고 있는 스레드 포인터
+
+==== nested donation before ====
+----------------                 --------------------
+| t0           |                 | t1               |
+| priority: 32 | --donated_to--> | priority: 31->32 |
+----------------                 --------------------
+
+==== nested donation after ====
+----------------                --------------------                 ------------------------
+| t2           |                | t0               |                 | t1                   |
+| priority: 33 | --donated_to-- | priority: 32->33 | --donated_to--> | priority: 31->32->33 |
+----------------                --------------------                 ------------------------
 
 ---- ALGORITHMS ----
 
 >> B3: How do you ensure that the highest priority thread waiting for
 >> a lock, semaphore, or condition variable wakes up first?
 
+우선 순위가 가장 높은 스레드를 찾아서 깨웁니다.
+
 >> B4: Describe the sequence of events when a call to lock_acquire()
 >> causes a priority donation.  How is nested donation handled?
 
+lock를 누군가 점유 중인 상황에서 lock 점유하려고 할 경우,
+1. 점유를 시도하려는 스레드와 점유 중인 스레드의 우선 순위를 비교합니다.
+2. 현재 스레드가 우선 순위가 더 높을 경우, 점유 중인 스레드에게 우선 순위를 기부합니다.
+3. 이때, 기부 받은 스레드가 다른 스레드에게 우선 순위를 기부 중이었다면 기부 받은 우선 순위를 전파합니다.
+
 >> B5: Describe the sequence of events when lock_release() is called
 >> on a lock that a higher-priority thread is waiting for.
+
+1. lock을 기다리고 있는 스레드 중에 현재 스레드에게 우선 순위를 기부했던 스레드가 있는지 찾습니다.
+2. 있으면 해당 스레드를 기부 목록에서 삭제합니다.
+3. 아직 현재 스레드에게 기부 중인 스레드가 있다면 그 중에서 우선 순위가 가장 높은 스레드의 우선 순위로 현재 스레드의 우선 순위를 설정합니다.
+4. 그렇지 않다면 원래 스레드의 우선 순위로 설정합니다.
+5. ready_list에 있는 스레드 중에 우선 순위가 가장 높은 스레드가 있다면 실행 흐름을 양보합니다.
 
 ---- SYNCHRONIZATION ----
 
 >> B6: Describe a potential race in thread_set_priority() and explain
 >> how your implementation avoids it.  Can you use a lock to avoid
 >> this race?
+
+thread_set_priority 함수를 호출하면 priority를 변경한 다음, ready_list에서 다음에 실행될 스레드와
+우선 순위를 비교합니다. 이때, ready_list는 공유 변수이기 때문에 여기서 경쟁 상태가 발생할 수 있습니다.
+따라서 저는 interrupt를 비활성화해서 경쟁 상태를 제거했습니다. interrupt를 비활성화하여 timer interrupt를
+발생하지 못하게 하면 context switching이 발생하지 않기 때문에 경쟁 상태가 일어나지 않는다고 판단했습니다.
 
 ---- RATIONALE ----
 
