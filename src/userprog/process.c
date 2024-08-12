@@ -179,7 +179,7 @@ push_stack (void **stack, const void *value, size_t size)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (tid_t child_tid) 
 {
   struct thread *parent = thread_current ();
   struct thread *child = NULL;
