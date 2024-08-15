@@ -539,6 +539,10 @@ init_thread (struct thread *t, const char *name, int priority)
   t->parent = NULL;
   list_init (&t->child_list);
 
+  t->esp = NULL;
+  t->next_mapid = 0;
+  list_init (&t->mappings);
+
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();

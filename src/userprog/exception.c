@@ -2,15 +2,25 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include "userprog/gdt.h"
+#include "userprog/pagedir.h"
+#include "userprog/process.h"
 #include "userprog/syscall.h"
+#include "threads/malloc.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "threads/vaddr.h"
+#include "vm/page.h"
+#include "vm/frame.h"
+#include "vm/swap.h"
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
 
 static void kill (struct intr_frame *);
 static void page_fault (struct intr_frame *);
+
+static bool within_user_stack (void *upage);
+static void grow_user_stack (struct thread *t, void *upage);
 
 /* Registers handlers for interrupts that can be caused by user
    programs.
@@ -149,15 +159,102 @@ page_fault (struct intr_frame *f)
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
 
-  /* To implement virtual memory, delete the rest of the function
-     body, and replace it with code that brings in the page to
-     which fault_addr refers. */
-//   printf ("Page fault at %p: %s error %s page in %s context.\n",
-//           fault_addr,
-//           not_present ? "not present" : "rights violation",
-//           write ? "writing" : "reading",
-//           user ? "user" : "kernel");
-//   kill (f);
-   exit (-1);
+  struct thread *t = thread_current ();
+  void *upage = pg_round_down (fault_addr);
+  struct page *p = page_table_lookup (&t->extra_page_table, upage);
+
+  if (!p)
+    {
+      void *limit = t->esp - 32;
+
+      /* Check if the address is a user stack. */
+      if (within_user_stack (fault_addr) && fault_addr >= limit)
+         grow_user_stack (t, upage);
+      else
+         exit (-1);
+    }
+  else
+    {
+      switch (p->segment)
+        {
+          case SEG_CODE:
+          case SEG_MAPPING:
+            {
+               void *kpage = frame_table_set_frame (upage);
+               frame_table_lock_frame (kpage);
+
+               if (p->writable && swap_table_is_swapped (t->tid, upage))
+                 swap_table_swap_out (t->tid, upage, kpage, p->position);
+               else
+                 {
+                   if (p->read_bytes > 0)
+                     {
+                        file_seek (p->file, p->position);
+                        if (file_read (p->file, kpage, p->read_bytes) != (int) p->read_bytes)
+                          {
+                            frame_table_clear_frame(kpage);
+                            exit (-1);
+                          }
+                     }
+                   memset (kpage + p->read_bytes, 0, p->zero_bytes);
+                 }
+
+               if (pagedir_get_page (t->pagedir, p->address) || !pagedir_set_page (t->pagedir, p->address, kpage, p->writable))
+                 {
+                   frame_table_clear_frame (kpage);
+                   exit (-1);
+                 }
+               
+               frame_table_unlock_frame (kpage);
+            }
+            break;
+           case SEG_STACK:
+             {
+               void *kpage = frame_table_set_frame (upage);
+               frame_table_lock_frame (kpage);
+
+               swap_table_swap_out (t->tid, upage, kpage, p->position);
+               if (!pagedir_set_page (t->pagedir, upage, kpage, true))
+                 {
+                   frame_table_clear_frame (kpage);
+                   exit (-1);
+                 }
+
+               frame_table_unlock_frame (kpage);
+             }
+             break;
+        }
+    }
 }
 
+static bool
+within_user_stack (void *address)
+{
+   void *high = PHYS_BASE;
+   void *low = PHYS_BASE - STACK_MAX_SIZE;
+   return address < high && address >= low;
+}
+
+static void
+grow_user_stack (struct thread *t, void *upage)
+{
+   while (pagedir_get_page (t->pagedir, upage) == NULL)
+     {
+       void *kpage = frame_table_set_frame (upage);
+       bool success = pagedir_set_page (t->pagedir, upage, kpage, true);
+       if (success)
+         {
+            struct page *p = malloc (sizeof (struct page));
+            p->address = upage;
+            p->segment = SEG_STACK;
+            p->writable = true;
+            page_table_insert (&t->extra_page_table, p);
+            upage += PGSIZE;
+         }
+       else
+         {
+            frame_table_clear_frame (kpage);
+            exit (-1);
+         }
+     }
+}

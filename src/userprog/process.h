@@ -5,6 +5,7 @@
 #include "threads/synch.h"
 
 #define USER_STACK (PHYS_BASE - 4)
+#define STACK_MAX_SIZE 1024 * 1024
 
 tid_t process_execute (const char *file_name);
 int process_wait (tid_t);

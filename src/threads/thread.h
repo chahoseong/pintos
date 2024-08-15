@@ -5,6 +5,7 @@
 #include <list.h>
 #include <stdint.h>
 #include "synch.h"
+#include "vm/page.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -27,6 +28,7 @@ typedef int tid_t;
 #define PRI_DONATION_MAX 8
 
 #define NOFILE 128
+
 
 /* A kernel thread or user process.
 
@@ -108,6 +110,12 @@ struct thread
     struct thread *parent;
     struct list child_list;
     struct list_elem child_elem;
+
+    void *esp;                         /* Saved user stack pointer. */
+    page_table_t extra_page_table;
+
+    mapid_t next_mapid;
+    struct list mappings;
 
     struct list_elem allelem;           /* List element for all threads list. */
 

@@ -14,10 +14,13 @@
 #include "threads/flags.h"
 #include "threads/init.h"
 #include "threads/interrupt.h"
+#include "threads/malloc.h"
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "threads/synch.h"
+#include "vm/page.h"
+#include "vm/frame.h"
 
 #define ARG_MAX 32
 #define DELIMITER " "
@@ -100,6 +103,9 @@ start_process (void *aux)
       argv[argc++] = token;
       token = strtok_r (NULL, DELIMITER, &params->args);
     }
+
+  /* Initialize supplemental page table. */
+  page_table_init (&thread_current ()->extra_page_table);
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
@@ -212,6 +218,19 @@ process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
+
+  /* Destroy supplemental page table. */
+  page_table_destroy (&cur->extra_page_table);
+
+  /* Unmap files. */
+  struct list_elem *cursor = list_begin (&cur->mappings);
+  while (cursor != list_end (&cur->mappings))
+    {
+      struct mapping *m = list_entry (cursor, struct mapping, elem);
+      file_close (m->file);
+      cursor = list_next (cursor);
+      free (m);
+    }
 
   /* Close executable and open files. */
   file_close (cur->executable);
@@ -529,40 +548,33 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
   ASSERT (pg_ofs (upage) == 0);
   ASSERT (ofs % PGSIZE == 0);
 
-  file_seek (file, ofs);
-  while (read_bytes > 0 || zero_bytes > 0) 
+  struct thread *t = thread_current ();
+
+  while (read_bytes > 0 || zero_bytes > 0)
     {
       /* Calculate how to fill this page.
-         We will read PAGE_READ_BYTES bytes from FILE
-         and zero the final PAGE_ZERO_BYTES bytes. */
+        We will read PAGE_READ_BYTES bytes from FILE
+        and zero the final PAGE_ZERO_BYTES bytes. */
       size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
       size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
-      /* Get a page of memory. */
-      uint8_t *kpage = palloc_get_page (PAL_USER);
-      if (kpage == NULL)
-        return false;
+      struct page *p = malloc (sizeof (struct page));
+      p->address = upage;
+      p->segment = SEG_CODE;
+      p->writable = writable;
+      p->file = file;
+      p->position = ofs;
+      p->read_bytes = page_read_bytes;
+      p->zero_bytes = page_zero_bytes;
+      page_table_insert (&t->extra_page_table, p);
 
-      /* Load this page. */
-      if (file_read (file, kpage, page_read_bytes) != (int) page_read_bytes)
-        {
-          palloc_free_page (kpage);
-          return false; 
-        }
-      memset (kpage + page_read_bytes, 0, page_zero_bytes);
-
-      /* Add the page to the process's address space. */
-      if (!install_page (upage, kpage, writable)) 
-        {
-          palloc_free_page (kpage);
-          return false; 
-        }
-
-      /* Advance. */
+      /* Advance */
       read_bytes -= page_read_bytes;
       zero_bytes -= page_zero_bytes;
       upage += PGSIZE;
+      ofs += page_read_bytes;
     }
+
   return true;
 }
 
@@ -572,16 +584,26 @@ static bool
 setup_stack (void **esp) 
 {
   uint8_t *kpage;
+  uint8_t *upage = ((uint8_t *) PHYS_BASE) - PGSIZE;
   bool success = false;
 
-  kpage = palloc_get_page (PAL_USER | PAL_ZERO);
+  kpage = frame_table_set_frame (upage);
   if (kpage != NULL) 
     {
-      success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
+      success = install_page (upage, kpage, true);
       if (success)
-        *esp = USER_STACK;
+        {
+          *esp = USER_STACK;
+
+          struct page *p = malloc (sizeof (struct page));
+          p->address = upage;
+          p->segment = SEG_STACK;
+          p->writable = true;
+          p->file = NULL;
+          page_table_insert (&thread_current ()->extra_page_table, p);
+        }
       else
-        palloc_free_page (kpage);
+        frame_table_clear_frame (kpage);
     }
   return success;
 }

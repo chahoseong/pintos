@@ -31,6 +31,10 @@
 #else
 #include "tests/threads/tests.h"
 #endif
+
+#include "vm/frame.h"
+#include "vm/swap.h"
+
 #ifdef FILESYS
 #include "devices/block.h"
 #include "devices/ide.h"
@@ -126,6 +130,9 @@ main (void)
   locate_block_devices ();
   filesys_init (format_filesys);
 #endif
+
+  frame_table_init ();
+  swap_table_init ();
 
   printf ("Boot complete.\n");
   

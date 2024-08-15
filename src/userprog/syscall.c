@@ -3,10 +3,16 @@
 #include <string.h>
 #include <syscall-nr.h>
 #include "devices/shutdown.h"
+#include "devices/input.h"
 #include "threads/interrupt.h"
+#include "threads/malloc.h"
+#include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "userprog/pagedir.h"
 #include "userprog/process.h"
+#include "vm/frame.h"
+#include "vm/page.h"
 #include "filesys/filesys.h"
 #include "filesys/file.h"
 
@@ -26,6 +32,9 @@ static int write (int fd, const void *buffer, unsigned size);
 static void seek (int fd, unsigned position);
 static unsigned tell (int fd);
 static void close (int fd);
+
+static mapid_t mmap (int fd, void *addr);
+static void munmap (mapid_t mapping);
 
 static void pop_stack (void **esp, void *value, size_t size);
 
@@ -158,6 +167,25 @@ syscall_handler (struct intr_frame *f)
           pop_stack (&f->esp, &fd, sizeof fd);
           
           close (fd);
+        }
+        break;
+      case SYS_MMAP:
+        {
+          int fd;
+          pop_stack (&f->esp, &fd, sizeof fd);
+
+          void *address;
+          pop_stack (&f->esp, &address, sizeof address);
+
+          f->eax = (uint32_t)mmap (fd, address);
+        }
+        break;
+      case SYS_MUNMAP:
+        {
+          mapid_t id;
+          pop_stack (&f->esp, &id, sizeof id);
+
+          munmap (id);
         }
         break;
       default:
@@ -357,6 +385,101 @@ close (int fd)
       lock_release (&file_lock);
       t->open_files[fd] = NULL;
     }
+}
+
+static mapid_t
+mmap (int fd, void *address)
+{
+  struct thread *t = thread_current ();
+
+  if (fd == STDIN_FILENO || fd == STDOUT_FILENO)
+    return MAP_FAILED;
+  if (fd < 0 || fd >= NOFILE)
+    return MAP_FAILED;
+
+  struct file *file = file_reopen (t->open_files[fd]);
+  off_t length = file_length (file);
+  off_t position = 0;
+
+  if (file == NULL || length == 0)
+    return MAP_FAILED;
+  if (pg_ofs (address) != 0 || address == NULL)
+    return MAP_FAILED;
+  if (page_table_lookup (&t->extra_page_table, address))
+    return MAP_FAILED;
+
+  struct mapping *mapping = malloc (sizeof (struct mapping));
+  mapping->mapid = t->next_mapid++;
+  mapping->file = file;
+  list_push_back (&t->mappings, &mapping->elem);
+
+  while (length > 0)
+    {
+      uint32_t read_bytes = length < PGSIZE ? length : PGSIZE;
+      uint32_t zero_bytes = PGSIZE - read_bytes;
+
+      struct page *p = malloc (sizeof (struct page));
+      p->address = address;
+      p->segment = SEG_MAPPING;
+      p->writable = true;
+      p->file = file;
+      p->mapid = mapping->mapid;
+      p->position = position;
+      p->read_bytes = read_bytes;
+      p->zero_bytes = zero_bytes;
+      page_table_insert (&t->extra_page_table, p);
+
+      address += PGSIZE;
+      position += read_bytes;
+      length -= read_bytes;
+    }
+
+  return mapping->mapid;
+}
+
+static void
+munmap (mapid_t mapid)
+{
+  struct thread *t = thread_current ();
+  struct hash_iterator i;
+  bool done = false;
+
+  struct mapping *mapping;
+  for (struct list_elem *cursor = list_begin (&t->mappings); cursor != list_end (&t->mappings); cursor = list_next (cursor))
+    {
+      struct mapping *m = list_entry (cursor, struct mapping, elem);
+      if (m->mapid == mapid)
+        {
+          mapping = m;
+          break;
+        }
+    }
+
+  hash_first (&i, &t->extra_page_table);
+  hash_next (&i);
+
+  while (!done)
+    {
+      struct page *p = hash_entry (hash_cur (&i), struct page, elem);
+      struct hash_iterator prev = i;
+      done = (hash_next (&i) == NULL);
+
+      if (p->segment == SEG_MAPPING && p->mapid == mapid)
+        {
+          void *kpage = frame_table_get_frame (p->address);
+          if (kpage != NULL && pagedir_is_dirty (t->pagedir, p->address))
+            {
+              file_seek (p->file, p->position);
+              file_write (p->file, kpage, PGSIZE);
+            }
+          hash_delete (&t->extra_page_table, hash_cur (&prev));
+          free (p);
+        }
+    }
+
+  file_close (mapping->file);
+  list_remove (&mapping->elem);
+  free (mapping);
 }
 
 static void
