@@ -305,6 +305,10 @@ read (int fd, void *buffer, unsigned size)
     exit (-1);
 
   struct thread *t = thread_current ();
+  
+  void *upage = pg_round_down (buffer);
+  void *kpage = frame_table_get_frame (upage);
+  frame_table_lock_frame (kpage);
 
   if (fd == STDIN_FILENO)
     {
@@ -315,10 +319,14 @@ read (int fd, void *buffer, unsigned size)
           memcpy ((uint8_t*)buffer + read_bytes, &data, sizeof data);
           read_bytes += sizeof (data);
         }
+      frame_table_unlock_frame (kpage);
       return size;
     }
   else if (t->open_files[fd] != NULL)
-    return file_read (t->open_files[fd], buffer, size);
+    {
+      frame_table_unlock_frame (kpage);
+      return file_read (t->open_files[fd], buffer, size);
+    }
 
 error:
   return -1;
@@ -333,6 +341,10 @@ write (int fd, const void *buffer, unsigned size)
     goto error;
 
   struct thread *t = thread_current ();
+
+  void *upage = pg_round_down (buffer);
+  void *kpage = frame_table_get_frame (upage);
+  frame_table_lock_frame (kpage);
 
   if (fd == STDOUT_FILENO)
     {
@@ -349,10 +361,14 @@ write (int fd, const void *buffer, unsigned size)
       if (remaining > 0)
         putbuf (buffer + offset, remaining);
 
+      frame_table_unlock_frame (kpage);
       return size;
     }
   else if (t->open_files[fd] != NULL)
-    return file_write (t->open_files[fd], buffer, size);
+    {
+      frame_table_unlock_frame (kpage);
+      return file_write (t->open_files[fd], buffer, size);
+    }
 
 error:
   return -1;
@@ -467,11 +483,13 @@ munmap (mapid_t mapid)
       if (p->segment == SEG_MAPPING && p->mapid == mapid)
         {
           void *kpage = frame_table_get_frame (p->address);
+          frame_table_lock_frame (kpage);
           if (kpage != NULL && pagedir_is_dirty (t->pagedir, p->address))
             {
               file_seek (p->file, p->position);
               file_write (p->file, kpage, PGSIZE);
             }
+          frame_table_unlock_frame (kpage);
           hash_delete (&t->extra_page_table, hash_cur (&prev));
           free (p);
         }
